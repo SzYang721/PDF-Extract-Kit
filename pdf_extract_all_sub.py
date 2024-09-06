@@ -10,6 +10,7 @@ import shutil
 import torch
 import numpy as np
 import gc
+import glob
 
 from paddleocr import draw_ocr
 from PIL import Image, ImageDraw, ImageFont
@@ -109,11 +110,19 @@ def main():
     
     start = time.time()
     if os.path.isdir(args.pdf):
-        all_pdfs = [os.path.join(args.pdf, name) for name in os.listdir(args.pdf)]
+    #    all_pdfs = [os.path.join(args.pdf, name) for name in os.listdir(args.pdf)]
+        all_pdfs = []
+        all_pdfs_second_dir_small = []
+        for second_dir_small in os.listdir(args.pdf):
+            second_dir = os.path.join(args.pdf,second_dir_small)
+            for pdf_path in glob.glob(f"{second_dir}/*.pdf"):
+                pdf_name = os.path.basename(pdf_path)[:-4]
+                all_pdfs.append(pdf_path)
+                all_pdfs_second_dir_small.append(second_dir_small)
     else:
-        all_pdfs = [args.pdf]
+       all_pdfs = [args.pdf]
     print("total files:", len(all_pdfs))
-    for idx, single_pdf in enumerate(all_pdfs):
+    for idx_pdf, single_pdf in enumerate(all_pdfs):
         try:
             img_list = load_pdf_fitz(single_pdf, dpi=dpi)
         except:
@@ -121,7 +130,7 @@ def main():
             print("unexpected pdf file:", single_pdf)
         if img_list is None:
             continue
-        print("pdf index:", idx, "pages:", len(img_list))
+        print("pdf index:", idx_pdf, "pages:", len(img_list))
         # layout detection and formula detection
         doc_layout_result = []
         latex_filling_list = []
@@ -213,7 +222,11 @@ def main():
                     res["latex"] = output[0]
 
 
-        output_dir = args.output
+        output_root = args.output
+        if os.path.isdir(args.pdf):
+            output_dir = os.path.join(output_root,all_pdfs_second_dir_small[idx_pdf])
+        else:
+            output_dir = output_root
         os.makedirs(output_dir, exist_ok=True)
         basename = os.path.basename(single_pdf)[0:-4]
         with open(os.path.join(output_dir, f'{basename}.json'), 'w') as f:
@@ -275,3 +288,4 @@ def main():
     
 if __name__ == '__main__':
     main()
+            
