@@ -75,6 +75,295 @@ class MathDataset(Dataset):
         return image
 
 
+def _check_image_file(path):
+    img_end = {"jpg", "bmp", "png", "jpeg", "rgb", "tif", "tiff", "gif", "pdf"}
+    return any([path.lower().endswith(e) for e in img_end])
+
+
+def get_image_file_list(img_file, infer_list=None):
+    imgs_lists = []
+    if infer_list and not os.path.exists(infer_list):
+        raise Exception("not found infer list {}".format(infer_list))
+    if infer_list:
+        with open(infer_list, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            image_path = line.strip().split("\t")[0]
+            image_path = os.path.join(img_file, image_path)
+            imgs_lists.append(image_path)
+    else:
+        if img_file is None or not os.path.exists(img_file):
+            raise Exception("not found any img file in {}".format(img_file))
+
+        img_end = {"jpg", "bmp", "png", "jpeg", "rgb", "tif", "tiff", "gif", "pdf"}
+        if os.path.isfile(img_file) and _check_image_file(img_file):
+            imgs_lists.append(img_file)
+        elif os.path.isdir(img_file):
+            for single_file in os.listdir(img_file):
+                file_path = os.path.join(img_file, single_file)
+                if os.path.isfile(file_path) and _check_image_file(file_path):
+                    imgs_lists.append(file_path)
+
+    if len(imgs_lists) == 0:
+        raise Exception("not found any img file in {}".format(img_file))
+    imgs_lists = sorted(imgs_lists)
+    return imgs_lists
+
+
+def get_image_file_list_nested(input_dir, output_dir, infer_list=None):
+    img_file_list = []
+    output_dirs = []
+
+    if infer_list and not os.path.exists(infer_list):
+        raise Exception("Infer list not found: {}".format(infer_list))
+
+    if infer_list:
+        with open(infer_list, "r") as f:
+            lines = f.readlines()
+        for line in lines:
+            image_path = line.strip().split("\t")[0]
+            image_path = os.path.join(input_dir, image_path)
+            relative_path = os.path.relpath(image_path, input_dir)
+            output_path = os.path.join(output_dir, relative_path)
+            output_dirs.add(os.path.dirname(output_path))
+            img_file_list.append((image_path, output_path))
+    else:
+        if input_dir is None or not os.path.exists(input_dir):
+            raise Exception("Input directory not found: {}".format(input_dir))
+
+        img_endings = {"jpg", "bmp", "png", "jpeg", "rgb", "tif", "tiff", "gif", "pdf"}
+        for root, dirs, files in os.walk(input_dir):
+            for file in files:
+                if file.split('.')[-1].lower() in img_endings:
+                    file_path = os.path.join(root, file)
+                    relative_path = os.path.relpath(file_path, input_dir)
+                    output_path = os.path.join(output_dir, relative_path)
+                    output_dirs.append(os.path.dirname(output_path))
+                    img_file_list.append(file_path)
+
+    if len(img_file_list) == 0:
+        raise Exception("No image files found in {}".format(input_dir))
+    
+    img_file_list = sorted(img_file_list)
+    return img_file_list, sorted(list(output_dirs))
+
+
+def PDF_extract_all_sub(args, pdf, output, batch_size, vis, render):
+    args.pdf = pdf
+    args.output = output
+    args.batch_size = batch_size
+    args.vis = vis
+    args.render = render
+    
+    tz = pytz.timezone('Asia/Shanghai')
+    now = datetime.datetime.now(tz)
+    print(now.strftime('%Y-%m-%d %H:%M:%S'))
+    print('Started!')
+    
+    ## ======== model init ========##
+    with open('configs/model_configs.yaml') as f:
+        model_configs = yaml.load(f, Loader=yaml.FullLoader)
+    img_size = model_configs['model_args']['img_size']
+    conf_thres = model_configs['model_args']['conf_thres']
+    iou_thres = model_configs['model_args']['iou_thres']
+    device = model_configs['model_args']['device']
+    dpi = model_configs['model_args']['pdf_dpi']
+    mfd_model = mfd_model_init(model_configs['model_args']['mfd_weight'])
+    mfr_model, mfr_vis_processors = mfr_model_init(model_configs['model_args']['mfr_weight'], device=device)
+    mfr_transform = transforms.Compose([mfr_vis_processors, ])
+    tr_model = tr_model_init(model_configs['model_args']['tr_weight'], max_time=model_configs['model_args']['table_max_time'], device=device)
+    layout_model = layout_model_init(model_configs['model_args']['layout_weight'])
+    ocr_model = ModifiedPaddleOCR(show_log=True)
+    print(now.strftime('%Y-%m-%d %H:%M:%S'))
+    print('Model init done!')
+    ## ======== model init ========##
+    
+    start = time.time()
+    if os.path.isdir(args.pdf):
+        all_pdfs, output_file_list = get_image_file_list_nested(args.pdf, args.output)
+        print("image_file_list", all_pdfs)
+        print("output_file_list", output_file_list)
+    #    all_pdfs = [os.path.join(args.pdf, name) for name in os.listdir(args.pdf)]
+        # all_pdfs = []
+        # all_pdfs_second_dir_small = []
+        # for second_dir_small in os.listdir(args.pdf):
+        #     second_dir = os.path.join(args.pdf,second_dir_small)
+        #     for pdf_path in glob.glob(f"{second_dir}/*.pdf"):
+        #         pdf_name = os.path.basename(pdf_path)[:-4]
+        #         all_pdfs.append(pdf_path)
+        #         all_pdfs_second_dir_small.append(second_dir_small)
+        # print(all_pdfs)
+        
+    else:
+       all_pdfs = [args.pdf]
+    print("total files:", len(all_pdfs))
+    # print("all_pdfs", all_pdfs)
+    for idx_pdf, single_pdf in enumerate(all_pdfs):
+        try:
+            img_list = load_pdf_fitz(single_pdf, dpi=dpi)
+        except:
+            # print(img_list)
+            img_list = None
+            print("unexpected pdf file:", single_pdf)
+        if img_list is None:
+            continue
+        print("pdf index:", idx_pdf, "pages:", len(img_list))
+        # layout detection and formula detection
+        doc_layout_result = []
+        latex_filling_list = []
+        mf_image_list = []
+        for idx, image in enumerate(img_list):
+            img_H, img_W = image.shape[0], image.shape[1]
+            layout_res = layout_model(image, ignore_catids=[])
+            mfd_res = mfd_model.predict(image, imgsz=img_size, conf=conf_thres, iou=iou_thres, verbose=True)[0]
+            for xyxy, conf, cla in zip(mfd_res.boxes.xyxy.cpu(), mfd_res.boxes.conf.cpu(), mfd_res.boxes.cls.cpu()):
+                xmin, ymin, xmax, ymax = [int(p.item()) for p in xyxy]
+                new_item = {
+                    'category_id': 13 + int(cla.item()),
+                    'poly': [xmin, ymin, xmax, ymin, xmax, ymax, xmin, ymax],
+                    'score': round(float(conf.item()), 2),
+                    'latex': '',
+                }
+                layout_res['layout_dets'].append(new_item)
+                latex_filling_list.append(new_item)
+                bbox_img = get_croped_image(Image.fromarray(image), [xmin, ymin, xmax, ymax])
+                mf_image_list.append(bbox_img)
+                
+            layout_res['page_info'] = dict(
+                page_no = idx,
+                height = img_H,
+                width = img_W
+            )
+            doc_layout_result.append(layout_res)
+
+            del mfd_res
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        # Formula recognition, collect all formula images in whole pdf file, then batch infer them.
+        a = time.time()  
+        dataset = MathDataset(mf_image_list, transform=mfr_transform)
+        dataloader = DataLoader(dataset, batch_size=args.batch_size, num_workers=32)
+        mfr_res = []
+        for imgs in dataloader:
+            imgs = imgs.to(device)
+            output = mfr_model.generate({'image': imgs})
+            mfr_res.extend(output['pred_str'])
+        for res, latex in zip(latex_filling_list, mfr_res):
+            res['latex'] = latex_rm_whitespace(latex)
+        b = time.time()
+        print("formula nums:", len(mf_image_list), "mfr time:", round(b-a, 2))
+            
+        # ocr and table recognition
+        for idx, image in enumerate(img_list):
+            pil_img = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+            single_page_res = doc_layout_result[idx]['layout_dets']
+            single_page_mfdetrec_res = []
+            for res in single_page_res:
+                if int(res['category_id']) in [13, 14]:
+                    xmin, ymin = int(res['poly'][0]), int(res['poly'][1])
+                    xmax, ymax = int(res['poly'][4]), int(res['poly'][5])
+                    single_page_mfdetrec_res.append({
+                        "bbox": [xmin, ymin, xmax, ymax],
+                    })
+            for res in single_page_res:
+                if int(res['category_id']) in [0, 1, 2, 4, 6, 7]:  #categories that need to do ocr
+                    xmin, ymin = int(res['poly'][0]), int(res['poly'][1])
+                    xmax, ymax = int(res['poly'][4]), int(res['poly'][5])
+                    crop_box = [xmin, ymin, xmax, ymax]
+                    cropped_img = Image.new('RGB', pil_img.size, 'white')
+                    cropped_img.paste(pil_img.crop(crop_box), crop_box)
+                    cropped_img = cv2.cvtColor(np.asarray(cropped_img), cv2.COLOR_RGB2BGR)
+                    ocr_res = ocr_model.ocr(cropped_img, mfd_res=single_page_mfdetrec_res)[0]
+                    if ocr_res:
+                        for box_ocr_res in ocr_res:
+                            p1, p2, p3, p4 = box_ocr_res[0]
+                            text, score = box_ocr_res[1]
+                            doc_layout_result[idx]['layout_dets'].append({
+                                'category_id': 15,
+                                'poly': p1 + p2 + p3 + p4,
+                                'score': round(score, 2),
+                                'text': text,
+                            })
+                elif int(res['category_id']) == 5: # do table recognition
+                    xmin, ymin = int(res['poly'][0]), int(res['poly'][1])
+                    xmax, ymax = int(res['poly'][4]), int(res['poly'][5])
+                    crop_box = [xmin, ymin, xmax, ymax]
+                    cropped_img = pil_img.convert("RGB").crop(crop_box)
+                    start = time.time()
+                    with torch.no_grad():
+                        output = tr_model(cropped_img)
+                    end = time.time()
+                    if (end-start) > model_configs['model_args']['table_max_time']:
+                        res["timeout"] = True
+                    res["latex"] = output[0]
+
+
+        output_root = args.output
+        if os.path.isdir(args.pdf):
+            output_dir = output_root,output_file_list[idx_pdf]
+        else:
+            output_dir = output_root
+        os.makedirs(output_dir, exist_ok=True)
+        basename = os.path.basename(single_pdf)[0:-4]
+        with open(os.path.join(output_dir, f'{basename}.json'), 'w') as f:
+            json.dump(doc_layout_result, f)
+        
+        if args.vis:
+            color_palette = [
+                (255,64,255),(255,255,0),(0,255,255),(255,215,135),(215,0,95),(100,0,48),(0,175,0),(95,0,95),(175,95,0),(95,95,0),
+                (95,95,255),(95,175,135),(215,95,0),(0,0,255),(0,255,0),(255,0,0),(0,95,215),(0,0,0),(0,0,0),(0,0,0)
+            ]
+            id2names = ["title", "plain_text", "abandon", "figure", "figure_caption", "table", "table_caption", "table_footnote", 
+                        "isolate_formula", "formula_caption", " ", " ", " ", "inline_formula", "isolated_formula", "ocr_text"]
+            vis_pdf_result = []
+            for idx, image in enumerate(img_list):
+                single_page_res = doc_layout_result[idx]['layout_dets']
+                vis_img = Image.new('RGB', Image.fromarray(image).size, 'white') if args.render else Image.fromarray(cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+                draw = ImageDraw.Draw(vis_img)
+                for res in single_page_res:
+                    label = int(res['category_id'])
+                    if label > 15:     # categories that do not need visualize
+                        continue
+                    label_name = id2names[label]
+                    x_min, y_min = int(res['poly'][0]), int(res['poly'][1])
+                    x_max, y_max = int(res['poly'][4]), int(res['poly'][5])
+                    if args.render and label in [13, 14, 15]:
+                        try:
+                            if label in [13, 14]:  # render formula
+                                window_img = tex2pil(res['latex'])[0]
+                            else:
+                                if True:           # render chinese
+                                    window_img = zhtext2pil(res['text'])
+                                else:              # render english
+                                    window_img = tex2pil([res['text']], tex_type="text")[0]
+                            ratio = min((x_max - x_min) / window_img.width, (y_max - y_min) / window_img.height) - 0.05
+                            window_img = window_img.resize((int(window_img.width * ratio), int(window_img.height * ratio)))
+                            vis_img.paste(window_img, (int(x_min + (x_max-x_min-window_img.width) / 2), int(y_min + (y_max-y_min-window_img.height) / 2)))
+                        except Exception as e:
+                            print(f"got exception on {text}, error info: {e}")
+                    draw.rectangle([x_min, y_min, x_max, y_max], fill=None, outline=color_palette[label], width=1)
+                    fontText = ImageFont.truetype("assets/fonts/simhei.ttf", 15, encoding="utf-8")
+                    draw.text((x_min, y_min), label_name, color_palette[label], font=fontText)
+                
+                width, height = vis_img.size
+                width, height = int(0.75*width), int(0.75*height)
+                vis_img = vis_img.resize((width, height))
+                vis_pdf_result.append(vis_img)
+            
+            first_page = vis_pdf_result.pop(0)
+            first_page.save(os.path.join(output_dir, f'{basename}.pdf'), 'PDF', resolution=100, save_all=True, append_images=vis_pdf_result)
+            try:
+                shutil.rmtree('./temp')
+            except:
+                pass
+            
+    now = datetime.datetime.now(tz)
+    end = time.time()
+    print(now.strftime('%Y-%m-%d %H:%M:%S'))
+    print('Finished! time cost:', int(end-start), 's')
+ 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--pdf', type=str)
@@ -110,22 +399,31 @@ def main():
     
     start = time.time()
     if os.path.isdir(args.pdf):
-    #    all_pdfs = [os.path.join(args.pdf, name) for name in os.listdir(args.pdf)]
-        all_pdfs = []
-        all_pdfs_second_dir_small = []
-        for second_dir_small in os.listdir(args.pdf):
-            second_dir = os.path.join(args.pdf,second_dir_small)
-            for pdf_path in glob.glob(f"{second_dir}/*.pdf"):
-                pdf_name = os.path.basename(pdf_path)[:-4]
-                all_pdfs.append(pdf_path)
-                all_pdfs_second_dir_small.append(second_dir_small)
+        try:
+            image_file_list = get_image_file_list(args.image_dir)
+        except:
+            image_file_list, output_file_list = get_image_file_list_nested(args.image_dir, args.output)
+            print("image_file_list", image_file_list)
+            print("output_file_list", output_file_list)
+        # all_pdfs = [os.path.join(args.pdf, name) for name in os.listdir(args.pdf)]
+        # # all_pdfs = []
+        # all_pdfs_second_dir_small = []
+        # for second_dir_small in os.listdir(args.pdf):
+        #     second_dir = os.path.join(args.pdf,second_dir_small)
+        #     for pdf_path in glob.glob(f"{second_dir}/*.pdf"):
+        #         pdf_name = os.path.basename(pdf_path)[:-4]
+        #         all_pdfs.append(pdf_path)
+        #         all_pdfs_second_dir_small.append(second_dir_small)
+        # print(all_pdfs)
     else:
        all_pdfs = [args.pdf]
     print("total files:", len(all_pdfs))
+    print("all_pdfs", all_pdfs)
     for idx_pdf, single_pdf in enumerate(all_pdfs):
         try:
             img_list = load_pdf_fitz(single_pdf, dpi=dpi)
         except:
+            # print(img_list)
             img_list = None
             print("unexpected pdf file:", single_pdf)
         if img_list is None:
@@ -286,6 +584,18 @@ def main():
     print(now.strftime('%Y-%m-%d %H:%M:%S'))
     print('Finished! time cost:', int(end-start), 's')
     
+    
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pdf', type=str)
+    parser.add_argument('--output', type=str, default="output")
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--vis', action='store_true')
+    parser.add_argument('--render', action='store_true')
+    args = parser.parse_args()
+    print(args)
+    
+    PDF_extract_all_sub(args, args.pdf, args.output, args.batch_size, args.vis, args.render)
+    
+    
             
